@@ -1,0 +1,20 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:viddy_well"
+        x:Class="viddy_well.MainWindow"
+        Title="Viddy Well"
+        Width="1200"
+        Height="800">
+    <Grid RowDefinitions="10*,80*,10*">
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="0"
+                   Margin="0,0,0,8"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Bottom"
+                   Text="Pass one or more log-file paths on the command line." />
+        <TabControl x:Name="LogTabs"
+                    Grid.Row="1"
+                    HorizontalAlignment="Stretch"
+                    VerticalAlignment="Stretch" />
+    </Grid>
+</Window>

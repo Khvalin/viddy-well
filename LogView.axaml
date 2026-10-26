@@ -1,0 +1,22 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:ae="clr-namespace:AvaloniaEdit;assembly=AvaloniaEdit"
+             x:Class="viddy_well.LogView">
+    <Grid ColumnDefinitions="*,Auto">
+        <ae:TextEditor x:Name="FragmentEditor"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Stretch"
+                       IsReadOnly="True"
+                       FontFamily="Cascadia Mono, Consolas, monospace"
+                       FontSize="14"
+                       ShowLineNumbers="True"
+                       HorizontalScrollBarVisibility="Auto"
+                       VerticalScrollBarVisibility="Hidden" />
+        <ScrollBar x:Name="LogicalScrollBar"
+                   Grid.Column="1"
+                   Width="16"
+                   Minimum="0"
+                   Orientation="Vertical"
+                   Visibility="Visible" />
+    </Grid>
+</UserControl>
