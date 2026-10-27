@@ -17,6 +17,14 @@
                    Width="16"
                    Minimum="0"
                    Orientation="Vertical"
-                   Visibility="Visible" />
+                   Visibility="Visible"
+                   AllowAutoHide="False" />
+        <ProgressBar x:Name="LoadingIndicator"
+                     Grid.ColumnSpan="2"
+                     Height="3"
+                     VerticalAlignment="Top"
+                     IsIndeterminate="True"
+                     IsHitTestVisible="False"
+                     IsVisible="False" />
     </Grid>
 </UserControl>
