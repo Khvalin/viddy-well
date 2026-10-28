@@ -1,16 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Controls;
+using Avalonia.Threading;
 using AvaloniaEdit.Document;
 
 namespace viddy_well;
 
 public partial class MainWindow : Window
 {
-    private const int FragmentLineCount = 1_000;
+    private const int FragmentLineCount = 1_024;
 
     private readonly List<OpenLogFile> _openLogs = [];
     private readonly List<CancellationTokenSource> _fragmentLoadCancellations = [];
@@ -68,6 +70,10 @@ public partial class MainWindow : Window
             var averageBytesPerLine = 1.0;
             var lineCountIsEstimated = log.InitialFragmentStartOffset > 0;
             CancellationTokenSource? activeFragmentLoad = null;
+            if (initialSampleComplete)
+            {
+                logView.StartTailFollowing();
+            }
 
             void UpdateLineCountDisplay()
             {
@@ -76,6 +82,56 @@ public partial class MainWindow : Window
                 {
                     StatusText.Text = $"Tailing {fullPath}: {prefix}{logView.TotalLineCount:N0} lines";
                 }
+            }
+
+            var pendingTailText = new StringBuilder();
+            var pendingTailEndOffset = 0L;
+            var tailFlushScheduled = false;
+
+            void FlushTailUpdates()
+            {
+                tailFlushScheduled = false;
+                if (pendingTailText.Length == 0)
+                {
+                    return;
+                }
+
+                var text = pendingTailText.ToString();
+                pendingTailText.Clear();
+                var endOffset = pendingTailEndOffset;
+
+                // Do not append a tail update into a historical fragment the user is reading.
+                if (ReferenceEquals(logView.Editor.Document, document))
+                {
+                    logView.AppendText(text);
+                    logView.UpdateFragmentByteRange(log.InitialFragmentStartOffset, endOffset);
+                }
+
+                logView.ScrollMaximum = Math.Max(logView.ScrollMaximum, endOffset);
+                estimatedLineCount += CountLineTerminators(text);
+                logView.TotalLineCount = Math.Max(estimatedLineCount, document.LineCount);
+                UpdateLineCountDisplay();
+            }
+
+            void QueueTailUpdate(LogFragmentEventArgs fragment)
+            {
+                pendingTailText.Append(fragment.Text);
+                pendingTailEndOffset = Math.Max(pendingTailEndOffset, fragment.EndOffset);
+
+                // Bound the deferred batch if the producer is faster than the UI dispatcher.
+                if (pendingTailText.Length >= 1024 * 1024)
+                {
+                    FlushTailUpdates();
+                    return;
+                }
+
+                if (tailFlushScheduled)
+                {
+                    return;
+                }
+
+                tailFlushScheduled = true;
+                Dispatcher.UIThread.Post(FlushTailUpdates, DispatcherPriority.Background);
             }
 
             logView.LogicalScrollRequested += async (_, request) =>
@@ -139,7 +195,12 @@ public partial class MainWindow : Window
 
             log.FragmentReceived += (_, fragment) =>
             {
-                // Do not append a tail update into a historical fragment the user is reading.
+                if (initialSampleComplete)
+                {
+                    QueueTailUpdate(fragment);
+                    return;
+                }
+
                 if (ReferenceEquals(logView.Editor.Document, document))
                 {
                     logView.AppendText(fragment.Text);
@@ -166,16 +227,9 @@ public partial class MainWindow : Window
                             firstByteOffset: log.InitialFragmentStartOffset,
                             endByteOffset: log.InitialFileLength);
                         logView.ScrollMaximum = log.InitialFileLength;
+                        logView.StartTailFollowing();
                     }
                 }
-                else if (initialSampleComplete)
-                {
-                    // We do not index the full file yet. Increase the estimate as complete
-                    // appended records arrive instead.
-                    estimatedLineCount += CountLineTerminators(fragment.Text);
-                    logView.TotalLineCount = Math.Max(estimatedLineCount, document.LineCount);
-                }
-
                 UpdateLineCountDisplay();
             };
             log.ReadFailed += (_, exception) => StatusText.Text = $"Unable to read {log.FileName}: {exception.Message}";

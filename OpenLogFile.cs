@@ -15,9 +15,11 @@ namespace viddy_well;
 public sealed class OpenLogFile : IDisposable
 {
     private const int ReadBufferSize = 64 * 1024;
-    private const int DefaultInitialFragmentLineCount = 1_000;
+    private const int DefaultInitialFragmentLineCount = 1_024;
 
     private readonly CancellationTokenSource _cancellation = new();
+    private readonly AutoResetEvent _fileChanged = new(initialState: false);
+    private readonly FileSystemWatcher _watcher;
     private readonly Thread _readerThread;
     private readonly Decoder _decoder = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: false).GetDecoder();
     private long _readPosition;
@@ -55,6 +57,17 @@ public sealed class OpenLogFile : IDisposable
         InitialFragmentStartOffset = _readPosition;
         _initialFragmentEndOffset = InitialFileLength;
         ReadStream.Position = _readPosition;
+
+        _watcher = new FileSystemWatcher(Path.GetDirectoryName(FileName)!, Path.GetFileName(FileName))
+        {
+            IncludeSubdirectories = false,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
+        };
+        _watcher.Changed += OnFileSystemChanged;
+        _watcher.Created += OnFileSystemChanged;
+        _watcher.Renamed += OnFileSystemRenamed;
+        _watcher.Error += OnFileSystemWatcherError;
+        _watcher.EnableRaisingEvents = true;
 
         _readerThread = new Thread(ReadUpdates)
         {
@@ -472,7 +485,7 @@ public sealed class OpenLogFile : IDisposable
 
                 if (_readPosition >= fileLength)
                 {
-                    Thread.Sleep(200);
+                    WaitForFileChange();
                     continue;
                 }
 
@@ -483,7 +496,7 @@ public sealed class OpenLogFile : IDisposable
                     : fileLength;
                 if (_readPosition >= readableEnd)
                 {
-                    Thread.Sleep(50);
+                    WaitForFileChange();
                     continue;
                 }
 
@@ -493,7 +506,7 @@ public sealed class OpenLogFile : IDisposable
                 var bytesRead = ReadStream.Read(bytes, 0, bytesToRead);
                 if (bytesRead == 0)
                 {
-                    Thread.Sleep(50);
+                    WaitForFileChange();
                     continue;
                 }
 
@@ -516,6 +529,39 @@ public sealed class OpenLogFile : IDisposable
         {
             ArrayPool<byte>.Shared.Return(bytes);
         }
+    }
+
+    private void OnFileSystemChanged(object? sender, FileSystemEventArgs e)
+    {
+        SignalFileChange();
+    }
+
+    private void OnFileSystemRenamed(object? sender, RenamedEventArgs e)
+    {
+        SignalFileChange();
+    }
+
+    private void OnFileSystemWatcherError(object? sender, ErrorEventArgs e)
+    {
+        // Recheck the file after an inotify/OS watcher overflow instead of waiting indefinitely.
+        SignalFileChange();
+    }
+
+    private void SignalFileChange()
+    {
+        try
+        {
+            _fileChanged.Set();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Disposal may race with a final watcher callback.
+        }
+    }
+
+    private void WaitForFileChange()
+    {
+        _fileChanged.WaitOne();
     }
 
     private string Decode(byte[] bytes, int byteCount)
@@ -566,9 +612,12 @@ public sealed class OpenLogFile : IDisposable
         }
 
         _disposed = true;
+        _watcher.Dispose();
         _cancellation.Cancel();
+        SignalFileChange();
         _readerThread.Join();
         ReadStream.Dispose();
+        _fileChanged.Dispose();
         _cancellation.Dispose();
         GC.SuppressFinalize(this);
     }

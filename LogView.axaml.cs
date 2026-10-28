@@ -1,4 +1,5 @@
 using System;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Threading;
@@ -21,11 +22,16 @@ public partial class LogView : UserControl
     private long _firstFragmentLine;
     private long _firstFragmentByteOffset;
     private long _fragmentEndByteOffset;
+    private bool _followingTail;
+    private bool _initialTailPositionPending;
+    private bool _tailLayoutPending;
+    private double _tailScrollOffset;
 
     public LogView()
     {
         InitializeComponent();
         FragmentEditor.Document = new TextDocument();
+        FragmentEditor.Options.AllowScrollBelowDocument = true;
         ReplaceLineNumberMargin();
         LogicalScrollBar.ValueChanged += OnLogicalScrollBarValueChanged;
         FragmentEditor.TextArea.TextView.ScrollOffsetChanged += OnEditorScrollOffsetChanged;
@@ -77,8 +83,77 @@ public partial class LogView : UserControl
         _firstFragmentByteOffset = Math.Max(0, firstByteOffset);
         _fragmentEndByteOffset = Math.Max(_firstFragmentByteOffset, endByteOffset);
         _lineNumberMargin.LineNumberOffset = _firstFragmentLine;
+        _followingTail = false;
         FragmentEditor.Document = document;
         SetScrollPosition(_firstFragmentByteOffset);
+    }
+
+    /// <summary>Enables buffered tail following for the currently loaded tail fragment.</summary>
+    public void StartTailFollowing()
+    {
+        _followingTail = true;
+
+        // The text view needs a completed layout before its viewport and line heights are valid.
+        var textView = FragmentEditor.TextArea.TextView;
+        if (((IScrollable)textView).Viewport.Height > 0 && textView.VisualLinesValid)
+        {
+            ScheduleTailPosition(initialPosition: true);
+            return;
+        }
+
+        _initialTailPositionPending = true;
+        FragmentEditor.LayoutUpdated -= OnInitialTailLayoutUpdated;
+        FragmentEditor.LayoutUpdated += OnInitialTailLayoutUpdated;
+        textView.VisualLinesChanged -= OnInitialTailVisualLinesChanged;
+        textView.VisualLinesChanged += OnInitialTailVisualLinesChanged;
+    }
+
+    private void OnInitialTailLayoutUpdated(object? sender, EventArgs e)
+    {
+        if (!_initialTailPositionPending || !_followingTail)
+        {
+            return;
+        }
+
+        var textView = FragmentEditor.TextArea.TextView;
+        if (((IScrollable)textView).Viewport.Height <= 0 || !textView.VisualLinesValid)
+        {
+            return;
+        }
+
+        PositionInitialTailAfterLayout();
+    }
+
+    private void OnInitialTailVisualLinesChanged(object? sender, EventArgs e)
+    {
+        if (!_initialTailPositionPending || !_followingTail)
+        {
+            return;
+        }
+
+        if (((IScrollable)FragmentEditor.TextArea.TextView).Viewport.Height <= 0)
+        {
+            return;
+        }
+
+        PositionInitialTailAfterLayout();
+    }
+
+    private void PositionInitialTailAfterLayout()
+    {
+        _initialTailPositionPending = false;
+        FragmentEditor.LayoutUpdated -= OnInitialTailLayoutUpdated;
+        FragmentEditor.TextArea.TextView.VisualLinesChanged -= OnInitialTailVisualLinesChanged;
+        ScheduleTailPosition(initialPosition: true);
+    }
+
+    /// <summary>Stops automatic movement while the user reads historical content.</summary>
+    public void StopTailFollowing()
+    {
+        _followingTail = false;
+        _initialTailPositionPending = false;
+        FragmentEditor.LayoutUpdated -= OnInitialTailLayoutUpdated;
+        FragmentEditor.TextArea.TextView.VisualLinesChanged -= OnInitialTailVisualLinesChanged;
     }
 
     /// <summary>Shows or hides the indeterminate indicator used while a historical fragment loads.</summary>
@@ -123,28 +198,79 @@ public partial class LogView : UserControl
             return;
         }
 
-        var followTail = IsScrolledToBottom();
+        if (_followingTail && FragmentEditor.TextArea.TextView.VerticalOffset + 2 < _tailScrollOffset)
+        {
+            // The user moved upward from the buffered tail position.
+            _followingTail = false;
+        }
+
         var document = FragmentEditor.Document;
         document.Insert(document.TextLength, text);
         document.UndoStack.ClearAll();
 
         TotalLineCount = Math.Max(TotalLineCount, _firstFragmentLine + document.LineCount);
-        if (!followTail)
+        if (_followingTail)
+        {
+            ScheduleTailPosition(initialPosition: false);
+        }
+    }
+
+    private void ScheduleTailPosition(bool initialPosition)
+    {
+        if (_tailLayoutPending)
         {
             return;
         }
 
-        SetScrollPosition(_fragmentEndByteOffset);
+        _tailLayoutPending = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _tailLayoutPending = false;
+            if (!_followingTail)
+            {
+                return;
+            }
 
-        // The text view's extent is updated during layout, so scroll after that layout pass.
-        Dispatcher.UIThread.Post(FragmentEditor.ScrollToEnd, DispatcherPriority.Render);
+            var textView = FragmentEditor.TextArea.TextView;
+            var scrollable = (IScrollable)textView;
+            var viewportHeight = scrollable.Viewport.Height;
+            if (viewportHeight <= 0 || FragmentEditor.Document.LineCount == 0)
+            {
+                return;
+            }
+
+            var finalLineTop = textView.GetVisualTopByDocumentLine(FragmentEditor.Document.LineCount);
+            var documentBottom = finalLineTop + textView.DefaultLineHeight;
+            var currentOffset = scrollable.Offset.Y;
+            double targetOffset;
+
+            if (initialPosition)
+            {
+                // Leave roughly the lower third blank so incoming lines can fill it smoothly.
+                targetOffset = documentBottom - viewportHeight * (2.0 / 3.0);
+            }
+            else if (documentBottom - currentOffset >= viewportHeight)
+            {
+                // Once the buffered third is full, advance by two thirds of a viewport.
+                targetOffset = currentOffset + viewportHeight * (2.0 / 3.0);
+            }
+            else
+            {
+                return;
+            }
+
+            _tailScrollOffset = Math.Max(0, targetOffset);
+            ScrollEditorToVerticalOffset(_tailScrollOffset);
+        }, DispatcherPriority.Background);
     }
 
-    private bool IsScrolledToBottom()
+    private void ScrollEditorToVerticalOffset(double verticalOffset)
     {
-        var scrollable = (IScrollable)FragmentEditor.TextArea.TextView;
-        const double tolerance = 1.0;
-        return scrollable.Offset.Y + scrollable.Viewport.Height >= scrollable.Extent.Height - tolerance;
+        // AvaloniaEdit 12.0.0's TextEditor.ScrollToVerticalOffset only applies its template;
+        // set the underlying IScrollable offset directly to perform the actual movement.
+        var scrollable = (IScrollable)FragmentEditor.TextArea;
+        var currentOffset = scrollable.Offset;
+        scrollable.Offset = new Vector(currentOffset.X, verticalOffset);
     }
 
     private void ReplaceLineNumberMargin()
@@ -199,6 +325,7 @@ public partial class LogView : UserControl
         }
 
         var requestedOffset = Math.Clamp((long)Math.Round(e.NewValue), 0, _scrollMaximum);
+        StopTailFollowing();
         if (requestedOffset >= _firstFragmentByteOffset && requestedOffset <= _fragmentEndByteOffset)
         {
             ScrollToByteOffset(requestedOffset);
