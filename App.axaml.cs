@@ -13,6 +13,8 @@ public partial class App : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
+        Diagnostics.Info("app loads");
+
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.MainWindow = new MainWindow(Program.CommandLineArguments);

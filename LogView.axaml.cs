@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -42,6 +43,12 @@ public partial class LogView : UserControl
 
     /// <summary>Zero-based logical line number represented by the first line in <see cref="Editor"/>.</summary>
     public long FirstFragmentLine => _firstFragmentLine;
+
+    /// <summary>Whether the view is currently following the newest log data.</summary>
+    public bool IsFollowingTail => _followingTail;
+
+    /// <summary>Number of actual log records retained by the active document fragment.</summary>
+    public int RetainedLineCount => GetActualLineCount(FragmentEditor.Document);
 
     /// <summary>Total number of logical lines in the complete log, exact or estimated.</summary>
     public long TotalLineCount
@@ -170,6 +177,58 @@ public partial class LogView : UserControl
         _fragmentEndByteOffset = Math.Max(_firstFragmentByteOffset, endByteOffset);
     }
 
+    /// <summary>
+    /// Removes the oldest records from the active document, retaining at most
+    /// <paramref name="maximumLineCount"/>. This is intended for tail-follow mode.
+    /// </summary>
+    public bool TrimHeadToLineCount(int maximumLineCount)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumLineCount);
+
+        var document = FragmentEditor.Document;
+        var retainedLineCount = GetActualLineCount(document);
+        if (retainedLineCount <= maximumLineCount)
+        {
+            return false;
+        }
+
+        var linesToRemove = retainedLineCount - maximumLineCount;
+        var firstRetainedDocumentLine = document.GetLineByNumber(linesToRemove + 1);
+        var charactersToRemove = firstRetainedDocumentLine.Offset;
+        var removedText = document.GetText(0, charactersToRemove);
+
+        var textView = FragmentEditor.TextArea.TextView;
+        var oldVerticalOffset = textView.VerticalOffset;
+        var removedVisualHeight = textView.VisualLinesValid
+            ? textView.GetVisualTopByDocumentLine(linesToRemove + 1)
+            : 0;
+
+        document.Remove(0, charactersToRemove);
+        _firstFragmentLine += linesToRemove;
+        _firstFragmentByteOffset += Encoding.UTF8.GetByteCount(removedText);
+        _fragmentEndByteOffset = Math.Max(_fragmentEndByteOffset, _firstFragmentByteOffset);
+        _lineNumberMargin.LineNumberOffset = _firstFragmentLine;
+
+        if (_followingTail)
+        {
+            ScheduleTailPosition(initialPosition: false);
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(
+                () => ScrollEditorToVerticalOffset(Math.Max(0, oldVerticalOffset - removedVisualHeight)),
+                DispatcherPriority.Background);
+        }
+
+        return true;
+    }
+
+    /// <summary>Extends the byte range after tail data is appended to the active fragment.</summary>
+    public void ExtendFragmentEndByteOffset(long endByteOffset)
+    {
+        _fragmentEndByteOffset = Math.Max(_fragmentEndByteOffset, endByteOffset);
+    }
+
     /// <summary>Scrolls the loaded editor fragment to an approximate byte offset.</summary>
     public void ScrollToByteOffset(long byteOffset)
     {
@@ -262,6 +321,17 @@ public partial class LogView : UserControl
             _tailScrollOffset = Math.Max(0, targetOffset);
             ScrollEditorToVerticalOffset(_tailScrollOffset);
         }, DispatcherPriority.Background);
+    }
+
+    private static int GetActualLineCount(TextDocument document)
+    {
+        if (document.TextLength == 0)
+        {
+            return 0;
+        }
+
+        var hasTrailingNewline = document.GetText(document.TextLength - 1, 1) == "\n";
+        return document.LineCount - (hasTrailingNewline ? 1 : 0);
     }
 
     private void ScrollEditorToVerticalOffset(double verticalOffset)

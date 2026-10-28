@@ -13,6 +13,8 @@ namespace viddy_well;
 public partial class MainWindow : Window
 {
     private const int FragmentLineCount = 1_024;
+    private const int TailBufferHighWaterMark = FragmentLineCount * 2;
+    private const int TailBufferTrimTarget = FragmentLineCount;
 
     private readonly List<OpenLogFile> _openLogs = [];
     private readonly List<CancellationTokenSource> _fragmentLoadCancellations = [];
@@ -43,6 +45,8 @@ public partial class MainWindow : Window
         try
         {
             var log = new OpenLogFile(fileName);
+            Diagnostics.Info("file is open");
+
             var document = new TextDocument();
             document.UndoStack.SizeLimit = 0;
 
@@ -104,7 +108,15 @@ public partial class MainWindow : Window
                 if (ReferenceEquals(logView.Editor.Document, document))
                 {
                     logView.AppendText(text);
-                    logView.UpdateFragmentByteRange(log.InitialFragmentStartOffset, endOffset);
+                    logView.ExtendFragmentEndByteOffset(endOffset);
+
+                    if (logView.IsFollowingTail && logView.RetainedLineCount > TailBufferHighWaterMark)
+                    {
+                        if (logView.TrimHeadToLineCount(TailBufferTrimTarget))
+                        {
+                            Diagnostics.Debug("the content is trimmed");
+                        }
+                    }
                 }
 
                 logView.ScrollMaximum = Math.Max(logView.ScrollMaximum, endOffset);
@@ -228,6 +240,7 @@ public partial class MainWindow : Window
                             endByteOffset: log.InitialFileLength);
                         logView.ScrollMaximum = log.InitialFileLength;
                         logView.StartTailFollowing();
+                        Diagnostics.Info("initial fragment is displayed");
                     }
                 }
                 UpdateLineCountDisplay();
