@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -16,6 +17,8 @@ public sealed class OpenLogFile : IDisposable
 {
     private const int ReadBufferSize = 64 * 1024;
     private const int DefaultInitialFragmentLineCount = 1_024;
+    private const int FragmentBatchSize = 1024 * 1024;
+    private static readonly TimeSpan FragmentBatchInterval = TimeSpan.FromMilliseconds(50);
 
     private readonly CancellationTokenSource _cancellation = new();
     private readonly AutoResetEvent _fileChanged = new(initialState: false);
@@ -460,6 +463,46 @@ public sealed class OpenLogFile : IDisposable
     private void ReadUpdates()
     {
         var bytes = ArrayPool<byte>.Shared.Rent(ReadBufferSize);
+        var pendingText = new StringBuilder();
+        var pendingStartOffset = 0L;
+        var pendingEndOffset = 0L;
+        var batchStopwatch = Stopwatch.StartNew();
+
+        void FlushPendingFragment()
+        {
+            if (pendingText.Length == 0)
+            {
+                return;
+            }
+
+            PostFragment(new LogFragmentEventArgs(
+                pendingStartOffset,
+                pendingEndOffset,
+                pendingText.ToString()));
+            pendingText.Clear();
+            batchStopwatch.Restart();
+        }
+
+        void WaitForNextFileChangeOrFlushBatch()
+        {
+            if (pendingText.Length == 0)
+            {
+                WaitForFileChange();
+                return;
+            }
+
+            var remaining = FragmentBatchInterval - batchStopwatch.Elapsed;
+            if (remaining > TimeSpan.Zero)
+            {
+                WaitForFileChange(remaining);
+            }
+
+            if (batchStopwatch.Elapsed >= FragmentBatchInterval)
+            {
+                FlushPendingFragment();
+            }
+        }
+
         try
         {
             while (!_cancellation.IsCancellationRequested)
@@ -485,7 +528,7 @@ public sealed class OpenLogFile : IDisposable
 
                 if (_readPosition >= fileLength)
                 {
-                    WaitForFileChange();
+                    WaitForNextFileChangeOrFlushBatch();
                     continue;
                 }
 
@@ -496,7 +539,7 @@ public sealed class OpenLogFile : IDisposable
                     : fileLength;
                 if (_readPosition >= readableEnd)
                 {
-                    WaitForFileChange();
+                    WaitForNextFileChangeOrFlushBatch();
                     continue;
                 }
 
@@ -506,7 +549,7 @@ public sealed class OpenLogFile : IDisposable
                 var bytesRead = ReadStream.Read(bytes, 0, bytesToRead);
                 if (bytesRead == 0)
                 {
-                    WaitForFileChange();
+                    WaitForNextFileChangeOrFlushBatch();
                     continue;
                 }
 
@@ -514,10 +557,17 @@ public sealed class OpenLogFile : IDisposable
                 var text = Decode(bytes, bytesRead);
                 if (text.Length != 0)
                 {
-                    PostFragment(new LogFragmentEventArgs(
-                        fragmentStart,
-                        _readPosition,
-                        text));
+                    if (pendingText.Length == 0)
+                    {
+                        pendingStartOffset = fragmentStart;
+                    }
+
+                    pendingText.Append(text);
+                    pendingEndOffset = _readPosition;
+                    if (pendingText.Length >= FragmentBatchSize || batchStopwatch.Elapsed >= FragmentBatchInterval)
+                    {
+                        FlushPendingFragment();
+                    }
                 }
             }
         }
@@ -527,6 +577,11 @@ public sealed class OpenLogFile : IDisposable
         }
         finally
         {
+            if (!_cancellation.IsCancellationRequested)
+            {
+                FlushPendingFragment();
+            }
+
             ArrayPool<byte>.Shared.Return(bytes);
         }
     }
@@ -559,8 +614,14 @@ public sealed class OpenLogFile : IDisposable
         }
     }
 
-    private void WaitForFileChange()
+    private void WaitForFileChange(TimeSpan? timeout = null)
     {
+        if (timeout.HasValue)
+        {
+            _fileChanged.WaitOne(timeout.Value);
+            return;
+        }
+
         _fileChanged.WaitOne();
     }
 

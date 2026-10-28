@@ -110,7 +110,7 @@ public partial class MainWindow : Window
                     logView.AppendText(text);
                     logView.ExtendFragmentEndByteOffset(endOffset);
 
-                    if (logView.IsFollowingTail && logView.RetainedLineCount > TailBufferHighWaterMark)
+                    if (logView.RetainedLineCount > TailBufferHighWaterMark)
                     {
                         if (logView.TrimHeadToLineCount(TailBufferTrimTarget))
                         {
